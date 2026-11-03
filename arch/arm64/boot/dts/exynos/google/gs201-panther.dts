@@ -164,6 +164,23 @@
 		 * buffers. Reusable, so the pages serve movable allocations
 		 * while unused.
 		 */
+		/*
+		 * The default CMA area (CONFIG_CMA_SIZE_MBYTES, 384 MiB), placed
+		 * anywhere. Left to the kernel it must sit below 4 GiB, where ABL
+		 * puts the initramfs at 0xb0000000 (chosen/linux,initrd-start): the
+		 * largest free range left there is 0x98500000..0xb0000000, 379 MiB,
+		 * so the reservation failed. Devices limited to 32-bit DMA here have
+		 * their own pools (display_pool, wifi_dma_pool).
+		 */
+		linux,cma {
+			compatible = "shared-dma-pool";
+			reusable;
+			size = <0x18000000>;
+			/* read with the root's #address-cells (2), not #size-cells */
+			alignment = <0x0 0x400000>;
+			linux,cma-default;
+		};
+
 		display_pool: display-pool {
 			compatible = "shared-dma-pool";
 			reusable;
