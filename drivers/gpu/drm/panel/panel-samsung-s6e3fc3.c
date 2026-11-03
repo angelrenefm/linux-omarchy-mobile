@@ -93,6 +93,23 @@ static void s6e3fc3_reset(struct s6e3fc3 *ctx)
 }
 
 /*
+ * The refresh rate, 60 or 90 Hz in the HS operating mode, as the vendor
+ * driver switches it (s6e3fc3_p10_change_frequency()): the panel takes it
+ * at its next frame.
+ */
+static void s6e3fc3_write_rate(struct mipi_dsi_multi_context *ctx,
+			       unsigned int hz)
+{
+	s6e3fc3_unlock_lvl2(ctx);
+	if (hz == 90)
+		mipi_dsi_dcs_write_seq_multi(ctx, 0x60, 0x08);
+	else
+		mipi_dsi_dcs_write_seq_multi(ctx, 0x60, 0x00);
+	s6e3fc3_freq_update(ctx);
+	s6e3fc3_lock_lvl2(ctx);
+}
+
+/*
  * Cold init after reset (Google's s6e3fc3_p10_init_cmds), for 60 Hz in the
  * HS operating mode, the vendor driver's default.
  */
@@ -135,11 +152,7 @@ static void s6e3fc3_init(struct mipi_dsi_multi_context *ctx)
 	s6e3fc3_freq_update(ctx);
 	s6e3fc3_lock_lvl2(ctx);
 
-	/* 60 Hz (0x60 0x08 is 90 Hz) */
-	s6e3fc3_unlock_lvl2(ctx);
-	mipi_dsi_dcs_write_seq_multi(ctx, 0x60, 0x00);
-	s6e3fc3_freq_update(ctx);
-	s6e3fc3_lock_lvl2(ctx);
+	s6e3fc3_write_rate(ctx, 60);
 }
 
 /*
@@ -258,6 +271,27 @@ static int s6e3fc3_unprepare(struct drm_panel *panel)
 	return 0;
 }
 
+/*
+ * The display controller switches between 60 and 90 Hz with
+ * drm_panel_set_refresh_rate(), keeping the panel on. A cold init (prepare)
+ * starts it at 60 Hz again.
+ */
+static int s6e3fc3_set_refresh_rate(struct drm_panel *panel, unsigned int hz)
+{
+	struct s6e3fc3 *ctx = to_s6e3fc3(panel);
+	struct mipi_dsi_multi_context dsi_ctx = { .dsi = ctx->dsi };
+
+	if (hz != 60 && hz != 90)
+		return -EINVAL;
+
+	guard(mutex)(&ctx->lock);
+	if (!ctx->prepared)
+		return -ENODEV;
+	s6e3fc3_write_rate(&dsi_ctx, hz);
+
+	return dsi_ctx.accum_err;
+}
+
 /* 1080x2400 at 60 Hz, the vendor driver's first mode */
 static const struct drm_display_mode s6e3fc3_p10_mode = {
 	.clock = (1080 + 32 + 12 + 26) * (2400 + 12 + 4 + 26) * 60 / 1000,
@@ -286,6 +320,7 @@ static const struct drm_panel_funcs s6e3fc3_panel_funcs = {
 	.disable = s6e3fc3_disable,
 	.unprepare = s6e3fc3_unprepare,
 	.get_modes = s6e3fc3_get_modes,
+	.set_refresh_rate = s6e3fc3_set_refresh_rate,
 };
 
 /*
