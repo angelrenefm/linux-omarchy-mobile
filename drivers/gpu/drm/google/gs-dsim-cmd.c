@@ -102,10 +102,11 @@ struct gs_dsim_rate {
 
 /*
  * One set per panel and link, found at probe from the timers the
- * bootloader left (its 60 Hz). Within a set, 120 Hz has half the TE
- * timeouts and the underrun of Google's dsim_calc_underrun(): the 60 Hz
- * value less the frame time saved (1e9 / 101 * (1/60 - 1/120) ns, te_var
- * 1) at the link's word clock, in units of 100 word clocks.
+ * bootloader left (its 60 Hz). Within a set, the higher rate has the TE
+ * timeouts scaled by the frame time and the underrun of Google's
+ * dsim_calc_underrun(): the 60 Hz value less the frame time saved
+ * (1e9 / 101 * (1/60 - 1/hz) ns, te_var 1) at the link's word clock, in
+ * units of 100 word clocks.
  */
 static const struct gs_dsim_rate gs_dsim_rates[][2] = {
 	/* Pixel 7 Pro, S6E3HC4 */
@@ -124,12 +125,17 @@ static const struct gs_dsim_rate gs_dsim_rates[][2] = {
 		{ .hz = 120, .underrun = 0x02a0, .te_ctrl1 = 0x15411836 },
 	},
 	/*
-	 * Pixel 7, S6E3FC3 P10: the bootloader's 60 Hz pair, read on the
-	 * phone. Its 90 Hz has no timers yet, so the second slot stays
-	 * empty and the link is never switched.
+	 * Pixel 7, S6E3FC3 P10: 4 lanes at 1102 Mbit/s (stock's dsim-modes
+	 * hs-clk), word clock 68.875 MHz. The 60 Hz pair is the
+	 * bootloader's, read on the phone. Google's dsim_calc_underrun()
+	 * with this link and the panel's te_idle_us 1000 and te_var 1 gives
+	 * exactly the bootloader's 0x1cf8 at 60 Hz, and 0x0e2c at 90 Hz.
+	 * The 90 Hz TE pair is the bootloader's scaled by 60/90, as the
+	 * other sets halve theirs for 120 Hz.
 	 */
 	{
 		{ .hz = 60, .underrun = 0x1cf8, .te_ctrl1 = 0x2a82306d },
+		{ .hz = 90, .underrun = 0x0e2c, .te_ctrl1 = 0x1c562048 },
 	},
 };
 
