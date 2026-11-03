@@ -14,9 +14,10 @@
  *    panel TE pulse while the hardware trigger is unmasked, and reports
  *    them as vblanks, and completes page flips once the shadow update has
  *    been taken;
- *  - switches between 60 and 120 Hz without a modeset, through the DSIM
- *    driver (link timers and the panel, gs-dsim.h), with memory bus and
- *    display clock floors from the ACPM DVFS clocks at 120 Hz.
+ *  - switches between 60 Hz and the panel's higher rate (120 Hz, 90 Hz
+ *    on the Pixel 7) without a modeset, through the DSIM driver (link
+ *    timers and the panel, gs-dsim.h), with memory bus and display clock
+ *    floors from the ACPM DVFS clocks above 60 Hz.
  *
  * It never stops DECON, never touches the DPU clocks or power domains, so
  * the DPU is never powered down under a running DECON. With the CRTC off
@@ -152,10 +153,11 @@
 #define GS_DECON_FRAME_DONE_TIMEOUT_MS	50
 
 /*
- * Floors while the panel runs at 120 Hz (DISPLAY-PLAN.md D5.2): DPP0 then
- * reads 2.16 GB/s, and stock pairs 120 Hz with MIF 1352 MHz; DECON needs
- * 1440 * 3120 * 120 * 1.1 / 2 pixels per clock = 297 MHz, the 310 MHz
- * DISP level.
+ * Floors while the panel runs above 60 Hz, sized for the Pixel 7 Pro at
+ * 120 Hz (DISPLAY-PLAN.md D5.2): DPP0 then reads 2.16 GB/s, and stock
+ * pairs 120 Hz with MIF 1352 MHz; DECON needs 1440 * 3120 * 120 * 1.1 / 2
+ * pixels per clock = 297 MHz, the 310 MHz DISP level. The Pixel 7 at
+ * 90 Hz needs less than half of that, and gets the same floors.
  */
 #define GS_DECON_MIF_FLOOR_HZ		1352000000UL
 #define GS_DECON_DISP_FLOOR_HZ		310000000UL
@@ -173,7 +175,7 @@ MODULE_PARM_DESC(stage,
 
 static unsigned int max_refresh = 120;
 module_param(max_refresh, uint, 0444);
-MODULE_PARM_DESC(max_refresh, "Highest refresh rate to offer, 60 or 120 (default)");
+MODULE_PARM_DESC(max_refresh, "Highest refresh rate to offer: 60, or the panel's highest (default)");
 
 static unsigned int screen_off;
 module_param(screen_off, uint, 0644);
@@ -210,24 +212,27 @@ static const struct drm_display_mode gs_decon_modes[] = {
 };
 
 /*
- * The Pixel 7's S6E3FC3 P10 at 1080x2400, as in Google's panel driver. The
- * bootloader starts it at 60 Hz; its 90 Hz mode is not offered yet.
+ * The Pixel 7's S6E3FC3 P10 at 1080x2400, 60 and 90 Hz, as in Google's
+ * panel driver. The bootloader starts it at 60 Hz.
  */
+#define PANTHER_DECON_MODE(hz) {					\
+	.clock = (1080 + 32 + 12 + 26) * (2400 + 12 + 4 + 26) * (hz) / 1000, \
+	.hdisplay = 1080,						\
+	.hsync_start = 1080 + 32,					\
+	.hsync_end = 1080 + 32 + 12,					\
+	.htotal = 1080 + 32 + 12 + 26,					\
+	.vdisplay = 2400,						\
+	.vsync_start = 2400 + 12,					\
+	.vsync_end = 2400 + 12 + 4,					\
+	.vtotal = 2400 + 12 + 4 + 26,					\
+	.width_mm = 66,							\
+	.height_mm = 146,						\
+	.type = DRM_MODE_TYPE_DRIVER,					\
+}
+
 static const struct drm_display_mode panther_decon_modes[] = {
-	{
-		.clock = (1080 + 32 + 12 + 26) * (2400 + 12 + 4 + 26) * 60 / 1000,
-		.hdisplay = 1080,
-		.hsync_start = 1080 + 32,
-		.hsync_end = 1080 + 32 + 12,
-		.htotal = 1080 + 32 + 12 + 26,
-		.vdisplay = 2400,
-		.vsync_start = 2400 + 12,
-		.vsync_end = 2400 + 12 + 4,
-		.vtotal = 2400 + 12 + 4 + 26,
-		.width_mm = 66,
-		.height_mm = 146,
-		.type = DRM_MODE_TYPE_DRIVER,
-	},
+	PANTHER_DECON_MODE(60),
+	PANTHER_DECON_MODE(90),
 };
 
 /*
@@ -269,7 +274,7 @@ struct gs_decon_soc_data {
 	bool separate_source_height;
 	bool padded_pitch;
 	bool start_hw_trigger;
-	/* the bootloader leaves MIF and DISP above the 120 Hz floors */
+	/* the bootloader leaves MIF and DISP above the high-rate floors */
 	bool floors_optional;
 };
 
@@ -333,7 +338,7 @@ struct gs_decon {
 	u32 height;
 	u32 pitch;
 
-	/* optional ACPM DVFS domains, floors at 120 Hz */
+	/* optional ACPM DVFS domains, floors above 60 Hz */
 	struct clk *mif;
 	struct clk *disp;
 
@@ -1363,9 +1368,9 @@ static void gs_decon_put_dsim(void *data)
  */
 static int gs_decon_get_dsim(struct gs_decon *dc)
 {
+	unsigned int hz, mode_hz, top = 0;
 	struct device_node *np;
-	unsigned int hz;
-	int ret;
+	int i, ret;
 
 	np = of_graph_get_remote_node(dc->dev->of_node, 0, 0);
 	if (!np) {
@@ -1394,14 +1399,21 @@ static int gs_decon_get_dsim(struct gs_decon *dc)
 	}
 	dc->hz = hz;
 
-	if (max_refresh >= 120 && (dc->mif || dc->soc->floors_optional) &&
-	    gs_dsim_can_set_refresh_rate(dc->dsim, 120))
-		dc->max_hz = 120;
-	else if (max_refresh >= 120)
-		dev_info(dc->dev, "120 Hz needs the mif clock, gs_dsim_cmd.allow_tx and the panel\n");
+	/* the panel's highest rate, up to max_refresh */
+	for (i = 0; i < dc->num_modes; i++) {
+		mode_hz = drm_mode_vrefresh(&dc->modes[i]);
+		if (mode_hz > top && mode_hz <= max_refresh)
+			top = mode_hz;
+	}
+	if (top > GS_DECON_BOOT_HZ && (dc->mif || dc->soc->floors_optional) &&
+	    gs_dsim_can_set_refresh_rate(dc->dsim, top))
+		dc->max_hz = top;
+	else if (top > GS_DECON_BOOT_HZ)
+		dev_info(dc->dev, "%u Hz needs the mif clock, gs_dsim_cmd.allow_tx and the panel\n",
+			 top);
 	if (dc->hz > dc->max_hz)
 		dc->max_hz = dc->hz;
-	/* a kexec from a kernel that left 120 Hz */
+	/* a kexec from a kernel that left the higher rate */
 	if (dc->hz > GS_DECON_BOOT_HZ)
 		gs_decon_set_floors(dc, dc->hz);
 
